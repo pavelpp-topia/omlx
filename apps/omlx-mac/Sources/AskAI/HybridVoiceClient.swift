@@ -221,8 +221,8 @@ final class HybridVoiceClient: VoiceClient {
         }
 
         if calls.isEmpty == false {
-            // Tool rounds sit in multi-second silence; speak a filler when the brain didn't.
-            if replyText.isEmpty { await speak(ack(), itemID: itemID) }
+            // Speak the brain's pre-tool words, or a canned filler, so tool rounds aren't silent.
+            await speak(replyText.isEmpty ? ack() : replyText, itemID: itemID)
             var toolCalls: [[String: Any]] = []
             for call in calls {
                 toolCalls.append([
