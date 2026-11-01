@@ -221,6 +221,8 @@ final class HybridVoiceClient: VoiceClient {
         }
 
         if calls.isEmpty == false {
+            // Tool rounds sit in multi-second silence; speak a filler when the brain didn't.
+            if replyText.isEmpty { await speak(ack(), itemID: itemID) }
             var toolCalls: [[String: Any]] = []
             for call in calls {
                 toolCalls.append([
@@ -276,6 +278,9 @@ final class HybridVoiceClient: VoiceClient {
             start = end
         }
     }
+
+    private static let acks = ["Let me check that.", "One second, let me look it up.", "Let me see what I can find."]
+    private func ack() -> String { Self.acks[itemCounter % Self.acks.count] }
 
     /// Splits sanitized text into short synthesis units so the speech decoder never loops.
     private static func sentences(_ text: String) -> [String] {
