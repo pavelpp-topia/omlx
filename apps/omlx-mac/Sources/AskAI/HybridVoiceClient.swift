@@ -247,19 +247,26 @@ final class HybridVoiceClient: VoiceClient {
         onEvent?(.responseDone(itemID: itemID, status: "completed"))
     }
 
-    private func speak(_ text: String, itemID: String) async {
-        var body: [String: Any] = [
-            "model": voiceModel,
-            "input": text,
-            "response_format": "wav",
-        ]
-        if !outputVoice.isEmpty { body["voice"] = outputVoice }
-        guard let request = Self.request(baseURL: baseURL, path: "/v1/audio/speech",
-                                         apiKey: apiKey, body: body),
-              let (data, response) = try? await Self.session.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+    private func speak(_ raw: String, itemID: String) async {
+        let text = Self.speakable(raw)
         lastSpoken = text.lowercased()
-        let pcm = Self.pcmFromWav(data)
+        // LFM3 drifts into audio-token repetition loops on long input; synthesize per sentence.
+        var pcm = Data()
+        for sentence in Self.sentences(text) {
+            var body: [String: Any] = [
+                "model": voiceModel,
+                "input": sentence,
+                "response_format": "wav",
+            ]
+            if !outputVoice.isEmpty { body["voice"] = outputVoice }
+            guard let request = Self.request(baseURL: baseURL, path: "/v1/audio/speech",
+                                             apiKey: apiKey, body: body),
+                  let (data, response) = try? await Self.session.data(for: request),
+                  (response as? HTTPURLResponse)?.statusCode == 200,
+                  !Task.isCancelled else { continue }
+            pcm.append(Self.pcmFromWav(data))
+        }
+        guard !pcm.isEmpty else { return }
         // 40 ms pieces, so the engine can start playing while synthesis still runs.
         let piece = 24000 * 2 * 40 / 1000
         var start = pcm.startIndex
@@ -268,6 +275,20 @@ final class HybridVoiceClient: VoiceClient {
             onEvent?(.audio(itemID: itemID, pcm: pcm.subdata(in: start..<end)))
             start = end
         }
+    }
+
+    /// Splits sanitized text into short synthesis units so the speech decoder never loops.
+    private static func sentences(_ text: String) -> [String] {
+        var units: [String] = []
+        var current = ""
+        for part in text.split(separator: ".", omittingEmptySubsequences: true) {
+            let sentence = part.trimmingCharacters(in: .whitespaces) + "."
+            if current.isEmpty { current = sentence }
+            else if current.count + sentence.count <= 220 { current += " " + sentence }
+            else { units.append(current); current = sentence }
+        }
+        if !current.isEmpty { units.append(current) }
+        return units
     }
 
     // MARK: HTTP plumbing
@@ -280,6 +301,26 @@ final class HybridVoiceClient: VoiceClient {
 
     /// The text model that answers; set from the voice settings before connecting.
     static var brainModel = ""
+
+    /// LFM3 TTS garbles URLs, markdown and typographic symbols; long replies drag on.
+    private static func speakable(_ raw: String) -> String {
+        var s = raw
+        for (symbol, word) in [("°", " degrees"), ("%", " percent"), ("&", " and"),
+                              ("+", " plus"), ("=", " equals")] {
+            s = s.replacingOccurrences(of: symbol, with: word)
+        }
+        s = s.replacingOccurrences(of: "https?://\\S+", with: "",
+                                   options: .regularExpression)
+        for ch in ["*", "_", "#", "`", "~", "|", "[", "]", "(", ")", "<", ">", "\""] {
+            s = s.replacingOccurrences(of: ch, with: " ")
+        }
+        s = s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        if s.count > 500 {
+            let head = String(s.prefix(500))
+            s = head[..<(head.lastIndex(of: ".") ?? head.index(before: head.endIndex))] + "."
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     private static func request(baseURL: URL, path: String, apiKey: String?,
                                body: [String: Any]) -> URLRequest? {
