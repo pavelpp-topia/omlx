@@ -26,6 +26,7 @@ final class HybridVoiceClient: VoiceClient {
     private var pendingPCM = Data()
     private var history: [[String: Any]] = []
     private var userImage: String?
+    private var lastSpoken = ""
     private var turn: Task<Void, Never>?
     private var closed = false
     private var itemCounter = 0
@@ -142,6 +143,13 @@ final class HybridVoiceClient: VoiceClient {
             onEvent?(.error(code: "transcription_failed", message: ""))
             return
         }
+        let heard = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // shortcut: AEC-leaked echo of our own TTS reads back as the last reply's tail; dropped silently
+        if heard.isEmpty || (heard.count >= 4 && lastSpoken.contains(heard)) {
+            onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
+            onEvent?(.responseDone(itemID: itemID, status: "completed"))
+            return
+        }
         var content: Any = text
         if let image {
             content = [
@@ -250,6 +258,7 @@ final class HybridVoiceClient: VoiceClient {
                                          apiKey: apiKey, body: body),
               let (data, response) = try? await Self.session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        lastSpoken = text.lowercased()
         let pcm = Self.pcmFromWav(data)
         // 40 ms pieces, so the engine can start playing while synthesis still runs.
         let piece = 24000 * 2 * 40 / 1000
