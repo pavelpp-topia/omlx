@@ -585,8 +585,8 @@ final class TalkAIController {
         turnToken += 1
         toolRounds = 0
         lastSpeech = Date()
-        // Speaking over a tool run drops it; the server forgets unanswered calls.
-        cancelTools()
+        // Hybrid keeps interrupted tool rounds running (client ignores stale outputs) for status queries.
+        if !(client is HybridVoiceClient) { cancelTools() }
         if isSharingScreen {
             screenshot = Task { try? await ScreenCapture.capture(maxPixelSize: Self.screenshotPixels) }
         }

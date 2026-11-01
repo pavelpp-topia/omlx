@@ -30,6 +30,8 @@ final class HybridVoiceClient: VoiceClient {
     private var turn: Task<Void, Never>?
     private var closed = false
     private var itemCounter = 0
+    private var toolGen = 0
+    private var activeToolGen = 0
 
     init(baseURL: URL, apiKey: String?, voiceModel: String) {
         self.baseURL = baseURL
@@ -91,6 +93,8 @@ final class HybridVoiceClient: VoiceClient {
         switch type {
         case "function_call_output":
             if let callID = item["call_id"] as? String {
+                // Outputs from an abandoned round (user asked something new) arrive stale; drop them.
+                guard activeToolGen == toolGen else { return }
                 history.append([
                     "role": "tool",
                     "tool_call_id": callID,
@@ -136,6 +140,21 @@ final class HybridVoiceClient: VoiceClient {
         }
     }
 
+    private static let statusReplies = [
+        "Yes, still processing. I'll let you know as soon as I have the results.",
+        "Still working on it, one moment.",
+        "Yes, I'm still here, still checking.",
+    ]
+    private static let statusWords = ["still", "checking", "yet", "done", "there", "ready", "status"]
+    private static func isStatusQuery(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return t.count <= 70 && statusWords.contains { t.contains($0) }
+    }
+    private static func hasPendingToolRound(_ history: [[String: Any]]) -> Bool {
+        guard let last = history.last, last["role"] as? String == "assistant" else { return false }
+        return last["tool_calls"] != nil
+    }
+
     private func runTurn(pcm: Data, image: String?, itemID: String, responseID: String) async {
         guard let text = try? await Self.transcribe(
             baseURL: baseURL, apiKey: apiKey, model: voiceModel, pcm: Self.wav(pcm)
@@ -151,6 +170,15 @@ final class HybridVoiceClient: VoiceClient {
             return
         }
         var content: Any = text
+        if Self.isStatusQuery(text), Self.hasPendingToolRound(history) {
+            // shortcut: status-ish queries get an instant canned reply; word list may false-positive rarely
+            NSLog("oMLX hybrid status query: %@", text)
+            onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
+            await speak(Self.statusReplies[itemCounter % Self.statusReplies.count], itemID: itemID)
+            onEvent?(.responseDone(itemID: itemID, status: "completed"))
+            return
+        }
+        toolGen += 1
         if let image {
             content = [
                 ["type": "text", "text": text.isEmpty ? "Describe the screen." : text],
@@ -242,6 +270,7 @@ final class HybridVoiceClient: VoiceClient {
                 "content": replyText.isEmpty ? NSNull() : replyText,
                 "tool_calls": toolCalls,
             ])
+            activeToolGen = toolGen
             onEvent?(.responseDone(itemID: itemID, status: "tool_calls"))
             return
         }
