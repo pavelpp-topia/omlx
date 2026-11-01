@@ -30,8 +30,10 @@ final class HybridVoiceClient: VoiceClient {
     private var turn: Task<Void, Never>?
     private var closed = false
     private var itemCounter = 0
-    private var toolGen = 0
-    private var activeToolGen = 0
+    private var needsRound = false
+    private var callsPending = 0
+    private var outputsSeen = 0
+    private var deferredUser: String?
 
     init(baseURL: URL, apiKey: String?, voiceModel: String) {
         self.baseURL = baseURL
@@ -93,13 +95,16 @@ final class HybridVoiceClient: VoiceClient {
         switch type {
         case "function_call_output":
             if let callID = item["call_id"] as? String {
-                // Outputs from an abandoned round (user asked something new) arrive stale; drop them.
-                guard activeToolGen == toolGen else { return }
                 history.append([
                     "role": "tool",
                     "tool_call_id": callID,
                     "content": item["output"] as? String ?? "",
                 ])
+                outputsSeen += 1
+                if outputsSeen >= callsPending, let deferred = deferredUser {
+                    history.append(["role": "user", "content": deferred])
+                    deferredUser = nil
+                }
             }
         case "message":
             if let content = item["content"] as? [[String: Any]] {
@@ -114,11 +119,12 @@ final class HybridVoiceClient: VoiceClient {
 
     private func startTurn() {
         if pendingPCM.isEmpty {
-            // Tool rounds arrive as response.create with no audio; history ends with the tool output.
-            guard let last = history.last, last["role"] as? String == "tool" else {
+            // Tool rounds arrive as response.create with no audio; a pending round must be answered.
+            guard needsRound, history.last != nil else {
                 onEvent?(.error(code: "input_audio_buffer_empty", message: ""))
                 return
             }
+            needsRound = false
             itemCounter += 1
             let itemID = "hybrid-item-\(itemCounter)"
             let responseID = "hybrid-response-\(itemCounter)"
@@ -150,10 +156,6 @@ final class HybridVoiceClient: VoiceClient {
         let t = text.lowercased()
         return t.count <= 70 && statusWords.contains { t.contains($0) }
     }
-    private static func hasPendingToolRound(_ history: [[String: Any]]) -> Bool {
-        guard let last = history.last, last["role"] as? String == "assistant" else { return false }
-        return last["tool_calls"] != nil
-    }
 
     private func runTurn(pcm: Data, image: String?, itemID: String, responseID: String) async {
         guard let text = try? await Self.transcribe(
@@ -170,7 +172,16 @@ final class HybridVoiceClient: VoiceClient {
             return
         }
         var content: Any = text
-        if Self.isStatusQuery(text), Self.hasPendingToolRound(history) {
+        if needsRound, outputsSeen < callsPending {
+            // A search is still running: queue the question after its results instead of dropping them.
+            NSLog("oMLX hybrid deferred during search: %@", text)
+            deferredUser = (deferredUser.map { $0 + " " } ?? "") + text
+            onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
+            await speak("Got it. Let me finish the current search first.", itemID: itemID)
+            onEvent?(.responseDone(itemID: itemID, status: "completed"))
+            return
+        }
+        if Self.isStatusQuery(text), needsRound {
             // shortcut: status-ish queries get an instant canned reply; word list may false-positive rarely
             NSLog("oMLX hybrid status query: %@", text)
             onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
@@ -178,7 +189,7 @@ final class HybridVoiceClient: VoiceClient {
             onEvent?(.responseDone(itemID: itemID, status: "completed"))
             return
         }
-        toolGen += 1
+        needsRound = false
         if let image {
             content = [
                 ["type": "text", "text": text.isEmpty ? "Describe the screen." : text],
@@ -270,7 +281,9 @@ final class HybridVoiceClient: VoiceClient {
                 "content": replyText.isEmpty ? NSNull() : replyText,
                 "tool_calls": toolCalls,
             ])
-            activeToolGen = toolGen
+            needsRound = true
+            callsPending = calls.count
+            outputsSeen = 0
             onEvent?(.responseDone(itemID: itemID, status: "tool_calls"))
             return
         }
