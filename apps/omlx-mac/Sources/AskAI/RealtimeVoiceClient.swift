@@ -74,7 +74,7 @@ extension RealtimeVoiceEvent {
 }
 
 @MainActor
-final class RealtimeVoiceClient {
+final class RealtimeVoiceClient: VoiceClient {
     /// Server events, then nil once the connection closes.
     var onEvent: ((RealtimeVoiceEvent?) -> Void)?
 

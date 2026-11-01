@@ -114,6 +114,10 @@ struct TalkPrefs: Codable, Equatable, Sendable {
     var gpuPowerLimitWatts = 10
     /// Tools the voice model may call, when its backend can call tools.
     var tools = AskAIToolPrefs()
+    /// Route voice through a text model: transcribe, chat, synthesize.
+    var hybridEnabled = false
+    /// The text model that answers in hybrid mode.
+    var hybridBrain = ""
 
     init() {}
 
@@ -130,6 +134,8 @@ struct TalkPrefs: Codable, Equatable, Sendable {
         gpuPowerLimitEnabled = c.lenient(Bool.self, .gpuPowerLimitEnabled) ?? fallback.gpuPowerLimitEnabled
         gpuPowerLimitWatts = c.lenient(Int.self, .gpuPowerLimitWatts) ?? fallback.gpuPowerLimitWatts
         tools = c.lenient(AskAIToolPrefs.self, .tools) ?? fallback.tools
+        hybridEnabled = c.lenient(Bool.self, .hybridEnabled) ?? fallback.hybridEnabled
+        hybridBrain = c.lenient(String.self, .hybridBrain) ?? fallback.hybridBrain
     }
 
     var requestGPUPowerLimit: Int? {

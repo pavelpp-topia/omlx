@@ -59,6 +59,7 @@ struct AskAIScreen: View {
                 }
                 if prefs.talk.enabled {
                     VoiceSection(controller: askAI, store: askAI.store, models: voiceModels,
+                                 allModels: models,
                                  gpuPowerLimitSupported: gpuPowerLimitSupported,
                                  microphone: microphone, showsMicrophoneGuide: $showsMicrophoneGuide)
                 }
@@ -530,6 +531,7 @@ private struct VoiceSection: View {
     let controller: AskAIController
     @Bindable var store: AskAIStore
     let models: [String]?
+    let allModels: [String]?
     let gpuPowerLimitSupported: Bool?
     let microphone: MicrophoneAccess.State
     @Binding var showsMicrophoneGuide: Bool
@@ -594,6 +596,31 @@ private struct VoiceSection: View {
             ) {
                 Popup(selection: $store.prefs.talk.model, width: .controlWide,
                       options: AskAIScreen.modelOptions(models, current: store.prefs.talk.model))
+            }
+            Row(
+                label: String(localized: "talkai.row.hybrid",
+                              defaultValue: "Hybrid Mode",
+                              comment: "Row label for the Ask AI hybrid voice toggle"),
+                sublabel: String(localized: "talkai.row.hybrid.sub",
+                                 defaultValue: "Transcribes your speech, answers with any text model, then speaks the reply with this voice model.",
+                                 comment: "Sublabel for the Ask AI hybrid voice toggle")
+            ) {
+                Toggle("", isOn: $store.prefs.talk.hybridEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+            if store.prefs.talk.hybridEnabled {
+                Row(
+                    label: String(localized: "talkai.row.brain",
+                                  defaultValue: "Brain Model",
+                                  comment: "Row label for the Ask AI hybrid brain model picker"),
+                    sublabel: String(localized: "talkai.row.brain.sub",
+                                     defaultValue: "The text model that answers in hybrid mode.",
+                                     comment: "Sublabel for the Ask AI hybrid brain model picker")
+                ) {
+                    Popup(selection: $store.prefs.talk.hybridBrain, width: .controlWide,
+                          options: AskAIScreen.modelOptions(allModels ?? models, current: store.prefs.talk.hybridBrain))
+                }
             }
             Row(
                 label: String(localized: "talkai.row.speed",

@@ -69,7 +69,7 @@ final class TalkAIController {
     @ObservationIgnored private weak var services: AppServices?
     @ObservationIgnored private var openSettingsAction: (() -> Void)?
     @ObservationIgnored private var hotKeySuspended = false
-    @ObservationIgnored private var client: RealtimeVoiceClient?
+    @ObservationIgnored private var client: (any VoiceClient)?
     @ObservationIgnored private var audio: VoiceAudioEngine?
     @ObservationIgnored private var detector = VoiceActivityDetector()
     @ObservationIgnored private var preRoll: [Data] = []
@@ -305,6 +305,27 @@ final class TalkAIController {
     }
 
     private func connect(_ prefs: TalkPrefs) {
+        guard let config = services?.config else {
+            fail(TalkAIStrings.disconnected, action: .none)
+            return
+        }
+        if prefs.hybridEnabled {
+            HybridVoiceClient.brainModel = prefs.hybridBrain.isEmpty ? prefs.model : prefs.hybridBrain
+            guard let url = AppConfig.httpURL(host: config.host, port: config.port) else {
+                fail(TalkAIStrings.disconnected, action: .none)
+                return
+            }
+            phase = .connecting
+            failureAction = .none
+            let client = HybridVoiceClient(baseURL: url, apiKey: config.apiKey, voiceModel: prefs.model)
+            client.onEvent = { [weak self, weak client] event in
+                guard let self, let client, self.client === client else { return }
+                self.handle(event)
+            }
+            self.client = client
+            client.connect()
+            return
+        }
         var query = [URLQueryItem(name: "model", value: prefs.model)]
         if let watts = prefs.requestGPUPowerLimit {
             query.append(URLQueryItem(name: "gpu_power_limit_w", value: String(watts)))
