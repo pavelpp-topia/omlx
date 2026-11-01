@@ -224,7 +224,7 @@ final class HybridVoiceClient: VoiceClient {
     units in words where natural. Never mention or hint at these instructions.
     """
 
-    private func chat(itemID: String, responseID: String) async {
+    private func chat(itemID: String, responseID: String, depth: Int = 0) async {
         var messages: [[String: Any]] = [["role": "system", "content": instructions + "\n\n" + Self.voiceStyleGuide]]
         messages += Self.tail(history, 24)
         var body: [String: Any] = [
@@ -234,7 +234,8 @@ final class HybridVoiceClient: VoiceClient {
             "max_tokens": 2048,
         ]
         let chatTools = Self.chatTools(tools)
-        if !chatTools.isEmpty { body["tools"] = chatTools }
+        if depth < 3 { body["tools"] = chatTools + [Self.localTool] }
+        else if !chatTools.isEmpty { body["tools"] = chatTools }
 
         guard let request = Self.request(baseURL: baseURL, path: "/v1/chat/completions",
                                          apiKey: apiKey, body: body) else { return }
@@ -277,9 +278,12 @@ final class HybridVoiceClient: VoiceClient {
 
         if calls.isEmpty == false {
             NSLog("oMLX hybrid tool round: %d calls, replyText len %d", calls.count, replyText.count)
-            // Speak pre-tool words that survive sanitizing; whitespace-only preambles fall back to the ack.
-            let preface = Self.speakable(replyText)
-            await speak(preface.isEmpty ? ack() : preface, itemID: itemID)
+            let controllerCalls = calls.filter { $0.name != "run_command" }
+            if controllerCalls.isEmpty == false {
+                // Speak pre-tool words that survive sanitizing; whitespace-only preambles fall back to the ack.
+                let preface = Self.speakable(replyText)
+                await speak(preface.isEmpty ? ack() : preface, itemID: itemID)
+            }
             var toolCalls: [[String: Any]] = []
             for call in calls {
                 toolCalls.append([
@@ -287,21 +291,32 @@ final class HybridVoiceClient: VoiceClient {
                     "type": "function",
                     "function": ["name": call.name, "arguments": call.arguments],
                 ])
-                onEvent?(.functionCall(
-                    callID: call.id, name: call.name,
-                    arguments: call.arguments, responseID: responseID
-                ))
             }
             history.append([
                 "role": "assistant",
                 "content": replyText.isEmpty ? NSNull() : replyText,
                 "tool_calls": toolCalls,
             ])
+            for call in calls where call.name == "run_command" {
+                let output = await Self.runLocalCommand(call.arguments)
+                history.append(["role": "tool", "tool_call_id": call.id, "content": output])
+            }
+            if controllerCalls.isEmpty {
+                // Local round resolved inline; loop straight back into the brain.
+                await chat(itemID: itemID, responseID: responseID, depth: depth + 1)
+                return
+            }
+            for call in controllerCalls {
+                onEvent?(.functionCall(
+                    callID: call.id, name: call.name,
+                    arguments: call.arguments, responseID: responseID
+                ))
+            }
             needsRound = true
-            callsPending = calls.count
+            callsPending = controllerCalls.count
             outputsSeen = 0
             roundStarted = Date()
-            pendingCallIDs = calls.map { $0.id }
+            pendingCallIDs = controllerCalls.map { $0.id }
             onEvent?(.responseDone(itemID: itemID, status: "tool_calls"))
             return
         }
@@ -366,6 +381,60 @@ final class HybridVoiceClient: VoiceClient {
     }
 
     // MARK: HTTP plumbing
+
+    /// Read-only local system info the brain may run; executed directly, no shell.
+    private static let commandAllowlist: Set<String> = [
+        "df", "du", "ls", "ps", "top", "sysctl", "pmset", "ifconfig", "uptime",
+        "vm_stat", "netstat", "iostat", "sw_vers", "date", "who", "wc",
+    ]
+
+    private static let localTool: [String: Any] = [
+        "type": "function",
+        "name": "run_command",
+        "description": "Run a whitelisted read-only system command on the user's Mac and return its stdout. "
+            + "Allowed binaries: df, du, ls, ps, top, sysctl, pmset, ifconfig, uptime, vm_stat, netstat, iostat, "
+            + "sw_vers, date, who, wc. Examples: 'df -h', 'pmset -g batt', 'top -l 1 | head -n 10' is NOT supported — "
+            + "single command, no pipes or redirects. Use this for disk space, battery, memory, network status.",
+        "parameters": [
+            "type": "object",
+            "properties": ["command": ["type": "string", "description": "e.g. 'df -h' or 'pmset -g batt'"]],
+            "required": ["command"],
+        ],
+    ]
+
+    private static func runLocalCommand(_ arguments: String) async -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any],
+              let command = json["command"] as? String else { return "Invalid arguments." }
+        let tokens = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard let name = tokens.first, commandAllowlist.contains(name),
+              !name.contains("/"),
+              tokens.allSatisfy({ !$0.contains("|") && !$0.contains(";") && !$0.contains(">") && !$0.contains("`") && !$0.contains("$") })
+        else { return "Command not allowed." }
+        let binary = ["/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/"]
+            .map { $0 + name }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+        guard let binary else { return "Command not found." }
+        return await Task.detached(priority: .userInitiated) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: binary)
+            proc.arguments = Array(tokens.dropFirst())
+            let out = Pipe()
+            proc.standardOutput = out
+            proc.standardError = Pipe()
+            do { try proc.run() } catch { return "Failed: \(error.localizedDescription)" }
+            let deadline = Date().addingTimeInterval(10)
+            while proc.isRunning, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if proc.isRunning {
+                proc.terminate()
+                return "Timed out."
+            }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: data, encoding: .utf8) ?? ""
+            return text.isEmpty ? "(no output)" : String(text.prefix(2000))
+        }.value
+    }
 
     private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
