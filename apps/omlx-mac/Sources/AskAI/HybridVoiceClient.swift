@@ -108,8 +108,19 @@ final class HybridVoiceClient: VoiceClient {
     }
 
     private func startTurn() {
-        guard pendingPCM.isEmpty == false else {
-            onEvent?(.error(code: "input_audio_buffer_empty", message: ""))
+        if pendingPCM.isEmpty {
+            // Tool rounds arrive as response.create with no audio; history ends with the tool output.
+            guard let last = history.last, last["role"] as? String == "tool" else {
+                onEvent?(.error(code: "input_audio_buffer_empty", message: ""))
+                return
+            }
+            itemCounter += 1
+            let itemID = "hybrid-item-\(itemCounter)"
+            let responseID = "hybrid-response-\(itemCounter)"
+            turn = Task { [weak self] in
+                self?.onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
+                await self?.chat(itemID: itemID, responseID: responseID)
+            }
             return
         }
         let pcm = pendingPCM
