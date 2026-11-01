@@ -504,6 +504,9 @@ final class TalkAIController {
         "input_audio_buffer_too_large",
         // A truncate or tool output that raced the reply it was meant for.
         "item_not_found",
+        // Hybrid: model loading or ASR hiccups end the turn, not the session.
+        "brain_failed",
+        "transcription_failed",
     ]
 
     private func startListening(modelDefault: String) {
@@ -639,6 +642,8 @@ final class TalkAIController {
     private func commitTurn() {
         flushAudio()
         client?.send(["type": "input_audio_buffer.commit"])
+        // A reply requested while the user was speaking (tool continuation) must die first.
+        if replyRequested { client?.send(["type": "response.cancel"]) }
         awaitingReply = true
         resetCaption()
         phase = .thinking

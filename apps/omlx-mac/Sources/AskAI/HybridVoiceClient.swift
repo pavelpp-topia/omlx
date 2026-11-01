@@ -34,6 +34,8 @@ final class HybridVoiceClient: VoiceClient {
     private var callsPending = 0
     private var outputsSeen = 0
     private var deferredUser: String?
+    private var roundStarted: Date?
+    private var pendingCallIDs: [String] = []
 
     init(baseURL: URL, apiKey: String?, voiceModel: String) {
         self.baseURL = baseURL
@@ -172,14 +174,28 @@ final class HybridVoiceClient: VoiceClient {
             return
         }
         var content: Any = text
-        if needsRound, outputsSeen < callsPending {
-            // A search is still running: queue the question after its results instead of dropping them.
-            NSLog("oMLX hybrid deferred during search: %@", text)
-            deferredUser = (deferredUser.map { $0 + " " } ?? "") + text
-            onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
-            await speak("Got it. Let me finish the current search first.", itemID: itemID)
-            onEvent?(.responseDone(itemID: itemID, status: "completed"))
-            return
+        if needsRound {
+            if let started = roundStarted, Date().timeIntervalSince(started) > 20 {
+                // The round's tools never delivered; stub the missing outputs and move on.
+                NSLog("oMLX hybrid abandoning stalled search round")
+                while outputsSeen < callsPending, outputsSeen < pendingCallIDs.count {
+                    history.append(["role": "tool", "tool_call_id": pendingCallIDs[outputsSeen],
+                                   "content": "(cancelled)"])
+                    outputsSeen += 1
+                }
+                if let deferred = deferredUser {
+                    history.append(["role": "user", "content": deferred])
+                    deferredUser = nil
+                }
+                needsRound = false
+            } else {
+                NSLog("oMLX hybrid deferred during search: %@", text)
+                deferredUser = (deferredUser.map { $0 + " " } ?? "") + text
+                onEvent?(.responseStarted(itemID: itemID, responseID: responseID))
+                await speak("Got it. Let me finish the current search first.", itemID: itemID)
+                onEvent?(.responseDone(itemID: itemID, status: "completed"))
+                return
+            }
         }
         if Self.isStatusQuery(text), needsRound {
             // shortcut: status-ish queries get an instant canned reply; word list may false-positive rarely
@@ -284,6 +300,8 @@ final class HybridVoiceClient: VoiceClient {
             needsRound = true
             callsPending = calls.count
             outputsSeen = 0
+            roundStarted = Date()
+            pendingCallIDs = calls.map { $0.id }
             onEvent?(.responseDone(itemID: itemID, status: "tool_calls"))
             return
         }
