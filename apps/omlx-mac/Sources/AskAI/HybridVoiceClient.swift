@@ -221,8 +221,10 @@ final class HybridVoiceClient: VoiceClient {
         }
 
         if calls.isEmpty == false {
-            // Speak the brain's pre-tool words, or a canned filler, so tool rounds aren't silent.
-            await speak(replyText.isEmpty ? ack() : replyText, itemID: itemID)
+            NSLog("oMLX hybrid tool round: %d calls, replyText len %d", calls.count, replyText.count)
+            // Speak pre-tool words that survive sanitizing; whitespace-only preambles fall back to the ack.
+            let preface = Self.speakable(replyText)
+            await speak(preface.isEmpty ? ack() : preface, itemID: itemID)
             var toolCalls: [[String: Any]] = []
             for call in calls {
                 toolCalls.append([
@@ -252,6 +254,7 @@ final class HybridVoiceClient: VoiceClient {
     private func speak(_ raw: String, itemID: String) async {
         let text = Self.speakable(raw)
         lastSpoken = text.lowercased()
+        NSLog("oMLX hybrid speak: text len %d, units %d, cancelled %d", text.count, Self.sentences(text).count, Task.isCancelled ? 1 : 0)
         // LFM3 drifts into audio-token repetition loops on long input; synthesize per sentence.
         var pcm = Data()
         for sentence in Self.sentences(text) {
@@ -262,10 +265,16 @@ final class HybridVoiceClient: VoiceClient {
             ]
             if !outputVoice.isEmpty { body["voice"] = outputVoice }
             guard let request = Self.request(baseURL: baseURL, path: "/v1/audio/speech",
-                                             apiKey: apiKey, body: body),
-                  let (data, response) = try? await Self.session.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200,
-                  !Task.isCancelled else { continue }
+                                             apiKey: apiKey, body: body) else {
+                NSLog("oMLX hybrid speak: request build failed")
+                continue
+            }
+            let result = try? await Self.session.data(for: request)
+            guard let (data, response) = result, (response as? HTTPURLResponse)?.statusCode == 200,
+                  !Task.isCancelled else {
+                NSLog("oMLX hybrid speak: synth failed or cancelled %d", Task.isCancelled ? 1 : 0)
+                continue
+            }
             pcm.append(Self.pcmFromWav(data))
         }
         guard !pcm.isEmpty else { return }
